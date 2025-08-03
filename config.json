@@ -1,0 +1,70 @@
+{
+  "scanner_settings": {
+    "default_interface": "wlan0",
+    "monitor_interface_suffix": "mon",
+    "scan_duration": 30,
+    "max_attempts_per_network": 3,
+    "retry_delay": 10,
+    "scan_cycle_delay": 60,
+    "handshake_timeout": 300,
+    "wps_attack_timeout": 300
+  },
+  "output_settings": {
+    "output_directory": "./wifi_scan_results",
+    "log_level": "INFO",
+    "save_pcap_files": true,
+    "generate_html_report": true,
+    "generate_json_report": true,
+    "auto_cleanup_old_files": true,
+    "max_file_age_days": 7
+  },
+  "scanning_tools": {
+    "airodump_ng": {
+      "enabled": true,
+      "priority": 1,
+      "additional_args": "-M --manufacturer"
+    },
+    "iwlist": {
+      "enabled": true,
+      "priority": 2,
+      "additional_args": ""
+    },
+    "nmcli": {
+      "enabled": true,
+      "priority": 3,
+      "additional_args": "--rescan yes"
+    },
+    "wifite": {
+      "enabled": false,
+      "priority": 4,
+      "additional_args": "--no-wps --no-wpa"
+    }
+  },
+  "attack_settings": {
+    "enable_wps_attacks": true,
+    "enable_handshake_capture": true,
+    "enable_deauth_attacks": true,
+    "deauth_packet_count": 5,
+    "target_open_networks": false,
+    "target_wep_networks": true,
+    "target_wpa_networks": true,
+    "min_signal_strength": -80
+  },
+  "filtering": {
+    "exclude_bssids": [],
+    "exclude_essids": ["Hidden"],
+    "include_only_bssids": [],
+    "include_only_essids": [],
+    "min_power_threshold": -90,
+    "exclude_manufacturers": []
+  },
+  "advanced_options": {
+    "use_multiple_interfaces": false,
+    "parallel_scanning": true,
+    "max_concurrent_attacks": 2,
+    "auto_channel_hopping": true,
+    "channel_hop_interval": 2,
+    "enable_client_tracking": true,
+    "probe_request_monitoring": true
+  }
+}
