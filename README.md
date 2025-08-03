@@ -1,4 +1,4 @@
-# Advanced WiFi Scanner for Kali Linux
+# Advanced WiFi Cracker for Kali Linux
 
 A powerful, automated WiFi scanner that captures nearby networks using multiple tools with intelligent retry logic and comprehensive reporting.
 
