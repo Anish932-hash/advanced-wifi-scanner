@@ -1,937 +1,685 @@
 #!/usr/bin/env python3
+# EchoFrame Invocation Chamber — Kali-ready consolidated build
+# Chunks 1–5 form one file when concatenated in order.
 
-# ╭─🧭 Chunk 0: Imports & Global Setup ─╮
+from __future__ import annotations
 
-import subprocess       # System command execution
-import time             # Timestamping and delays
-import threading        # Non-blocking execution
-import os               # File handling and environment checks
-import re               # Regex parsing
-import json             # Structured logging
-import logging          # Optional audit logging
-from datetime import datetime  # Relic timestamping
+import os
+import sys
+import json
+import platform
+import logging
+import hashlib
+import base64
+import secrets
+import shutil
+import threading
+import queue
+import datetime
+import importlib.util
+import subprocess
+import stat
+from pathlib import Path
+from typing import Any, Dict, Optional, Callable
 
-# Symbolic glyphs for attack types
-GLYPHS = {
-    "deauth": "🧨",
-    "handshake": "📡",
-    "pmkid": "🧬"
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
+# ---------- App identity ----------
+APP_NAME = "EchoFrame Invocation Chamber"
+APP_ID = "echoframe.gui"
+APP_VERSION = "1.1.0"
+
+# ---------- Paths & config ----------
+HOME = Path.home()
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = HOME / ".local" / "share" / "echoframe"
+CONF_DIR = HOME / ".config" / "echoframe"
+LOG_DIR = DATA_DIR / "logs"
+THEME_DIR = DATA_DIR / "themes"
+PLUGIN_DIR = DATA_DIR / "plugins"
+ARCHIVE_DIR = DATA_DIR / "archives"
+for d in (DATA_DIR, CONF_DIR, LOG_DIR, THEME_DIR, PLUGIN_DIR, ARCHIVE_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+SETTINGS_FILE = CONF_DIR / "settings.json"
+RITUAL_LOG_FILE = LOG_DIR / "ritual.log"
+
+# ---------- Safety banner ----------
+SAFETY_BANNER = (
+    "Operate only on networks you own or have explicit, written permission to assess."
+)
+
+# ---------- Themes ----------
+DEFAULT_THEME = "Dark Epoch"
+THEMES: Dict[str, Dict[str, str]] = {
+    "Dark Epoch": {
+        "bg": "#0f1115", "panel": "#161a20", "fg": "#d7f5d0", "muted": "#90a2b2",
+        "accent": "#ffcc00", "error": "#ff6b6b", "ok": "#00d084", "glyph": "#7aa2f7",
+    },
+    "Solar Rebirth": {
+        "bg": "#fffaf0", "panel": "#fff1d6", "fg": "#2c2c2c", "muted": "#5a5a5a",
+        "accent": "#cc7a00", "error": "#d00000", "ok": "#008a3b", "glyph": "#005cc5",
+    },
+    "Ashen Memory": {
+        "bg": "#1a1b1e", "panel": "#23252a", "fg": "#e6e6e6", "muted": "#9a9a9a",
+        "accent": "#c0c0c0", "error": "#ff5c8a", "ok": "#56d364", "glyph": "#8eace3",
+    },
 }
 
-# Tier classification for symbolic rendering
-TIERS = {
-    "deauth": "Relic",
-    "handshake": "Relic",
-    "pmkid": "Relic"
+# ---------- Logging (file + in-memory for GUI) ----------
+GUI_LOG_QUEUE: "queue.Queue[str]" = queue.Queue(maxsize=2000)
+LOGGER = logging.getLogger(APP_ID)
+LOGGER.setLevel(logging.DEBUG)
+_fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+
+class InMemoryLogHandler(logging.Handler):
+    def __init__(self, q: queue.Queue):
+        super().__init__(level=logging.INFO)
+        self.q = q
+        self.setFormatter(_fmt)
+    def emit(self, record: logging.LogRecord):
+        try:
+            self.q.put(self.format(record))
+        except Exception:
+            pass
+
+file_handler = logging.FileHandler(RITUAL_LOG_FILE, encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(_fmt)
+LOGGER.addHandler(file_handler)
+LOGGER.addHandler(InMemoryLogHandler(GUI_LOG_QUEUE))
+LOGGER.info(f"{APP_NAME} v{APP_VERSION} starting…")
+
+# ---------- Settings I/O ----------
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "theme": DEFAULT_THEME,
+    "owner_gate": {
+        "stored": "", "salt": "", "n": 2**14, "r": 8, "p": 1, "dklen": 64,
+        "hint": "Your private seal phrase (remember it).",
+    },
+    "core_module": "",  # path or module name to your existing core script
+    "last_paths": {"cap": "", "wordlist": "", "bssid": ""},
+    "owner_gate_required": True,
+    "archive_logs": True,
+    "archive_max_files": 20,
 }
 
-# ╰─🔗 End Chunk 0 ─╯
-
-# ╭─🔥 Chunk 1: Initialization & Monitor Mode ─╮
-
-class AgniShardCore:
-    def __init__(self, interface):
-        self.interface = interface
-        self.attack_log = []
-
-    def enable_monitor_mode(self):
-        cmd = ["airmon-ng", "start", self.interface]
+def load_settings() -> Dict[str, Any]:
+    if SETTINGS_FILE.exists():
         try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️ Failed to enable monitor mode: {e}")
-
-    def disable_monitor_mode(self):
-        cmd = ["airmon-ng", "stop", self.interface]
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️ Failed to disable monitor mode: {e}")
-
-# ╰─🧿 End Chunk 1 ─╯
-
-# ╭─🧨 Chunk 2: Tool Execution & Ethical Gating ─╮
-
-    def run_tool(self, cmd, simulate=False):
-        if simulate:
-            print(f"[DRY-RUN] {' '.join(cmd)}")
-            return "Simulated output", None
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return result.stdout, result.stderr
-        except subprocess.CalledProcessError as e:
-            return None, f"Subprocess error: {e}"
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            merged = {**DEFAULT_SETTINGS, **data}
+            merged["owner_gate"] = {**DEFAULT_SETTINGS["owner_gate"], **merged.get("owner_gate", {})}
+            merged["last_paths"] = {**DEFAULT_SETTINGS["last_paths"], **merged.get("last_paths", {})}
+            return merged
         except Exception as e:
-            return None, f"Unexpected error: {e}"
+            LOGGER.error(f"Failed to load settings: {e}")
+    return json.loads(json.dumps(DEFAULT_SETTINGS))
 
-# ╰─🛡️ End Chunk 2 ─╯
+def save_settings(s: Dict[str, Any]) -> None:
+    try:
+        SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+    except Exception as e:
+        LOGGER.error(f"Failed to save settings: {e}")
 
-# ╭─⚔️ Chunk 3: Attack Invocation Layer ─╮
+SETTINGS = load_settings()
 
-    def perform_deauth(self, bssid, channel, simulate=False, consent=True):
-        if not consent:
-            print("⛔ Consent not provided. Aborting deauth.")
+# ---------- Owner gate (scrypt) ----------
+def _scrypt_hash(secret: str, salt_b: bytes, n: int, r: int, p: int, dklen: int) -> bytes:
+    return hashlib.scrypt(secret.encode("utf-8"), salt=salt_b, n=n, r=r, p=p, dklen=dklen)
+
+def set_owner_gate_secret(secret: str, hint: Optional[str] = None) -> None:
+    gate = SETTINGS["owner_gate"]
+    salt_b = secrets.token_bytes(16)
+    digest = _scrypt_hash(secret, salt_b, gate["n"], gate["r"], gate["p"], gate["dklen"])
+    gate["stored"] = base64.b64encode(digest).decode("ascii")
+    gate["salt"] = base64.b64encode(salt_b).decode("ascii")
+    if hint is not None:
+        gate["hint"] = hint
+    save_settings(SETTINGS)
+    LOGGER.info("Owner gate secret set.")
+
+def verify_owner_secret(secret: str) -> bool:
+    gate = SETTINGS["owner_gate"]
+    if not gate.get("stored") or not gate.get("salt"):
+        set_owner_gate_secret(secret)
+        return True
+    try:
+        salt_b = base64.b64decode(gate["salt"])
+        expected = base64.b64decode(gate["stored"])
+        digest = _scrypt_hash(secret, salt_b, gate["n"], gate["r"], gate["p"], gate["dklen"])
+        return secrets.compare_digest(digest, expected)
+    except Exception as e:
+        LOGGER.error(f"Owner gate verification error: {e}")
+        return False
+
+class OwnerGateDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk, theme: Dict[str, str], hint: str):
+        super().__init__(parent)
+        self.title("Owner Gate")
+        self.resizable(False, False)
+        self.configure(bg=theme["panel"])
+        self.result: Optional[str] = None
+        frm = tk.Frame(self, bg=theme["panel"])
+        frm.pack(padx=16, pady=16, fill="both", expand=True)
+        tk.Label(frm, text="Enter seal phrase to unlock relic:", bg=theme["panel"], fg=theme["fg"])\
+            .grid(row=0, column=0, sticky="w")
+        self.entry = ttk.Entry(frm, show="*")
+        self.entry.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+        frm.columnconfigure(0, weight=1)
+        tk.Label(frm, text=f"Hint: {hint}", bg=theme["panel"], fg=theme["muted"])\
+            .grid(row=2, column=0, sticky="w", pady=(0, 10))
+        btns = tk.Frame(frm, bg=theme["panel"])
+        btns.grid(row=3, column=0, sticky="e")
+        ttk.Button(btns, text="Unlock", command=self._ok).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="left")
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.transient(parent); self.grab_set(); self.entry.focus_set()
+    def _ok(self): self.result = self.entry.get(); self.destroy()
+    def _cancel(self): self.result = None; self.destroy()
+
+def owner_gate_flow(root: tk.Tk, theme: Dict[str, str]) -> bool:
+    if not SETTINGS.get("owner_gate_required", True):
+        LOGGER.info("Owner gate disabled by settings."); return True
+    dlg = OwnerGateDialog(root, theme, SETTINGS["owner_gate"].get("hint", ""))
+    root.wait_window(dlg)
+    if dlg.result is None:
+        LOGGER.warning("Owner gate canceled."); return False
+    if verify_owner_secret(dlg.result):
+        LOGGER.info("Owner gate passed."); return True
+    LOGGER.error("Owner gate failed.")
+    messagebox.showerror("Access Denied", "Seal phrase rejected. Ritual aborted.")
+    return False
+
+# ---------- Log archiving ----------
+def archive_log_if_needed() -> None:
+    try:
+        if not SETTINGS.get("archive_logs", True) or not RITUAL_LOG_FILE.exists():
             return
-        self.enable_monitor_mode()
+        today = datetime.datetime.now().strftime("%Y%m%d")
+        stamp_name = ARCHIVE_DIR / f"ritual_{today}.log"
+        if not stamp_name.exists():
+            shutil.copy2(RITUAL_LOG_FILE, stamp_name)
+        archives = sorted(ARCHIVE_DIR.glob("ritual_*.log"))
+        max_files = int(SETTINGS.get("archive_max_files", 20))
+        while len(archives) > max_files:
+            old = archives.pop(0)
+            try: old.unlink()
+            except Exception: break
+    except Exception as e:
+        LOGGER.error(f"Archiving error: {e}")
+
+archive_log_if_needed()
+
+# ---------- Core bridge (preserves your original functions) ----------
+CoreFunc = Callable[..., Any]
+
+class CoreBridge:
+    def __init__(self):
+        self.module = None
+        self.funcs: Dict[str, CoreFunc] = {}
+    def load(self, module_path_or_name: str) -> None:
+        LOGGER.info(f"Loading core module: {module_path_or_name}")
         try:
-            cmd = ["aireplay-ng", "--deauth", "10", "-a", bssid, self.interface]
-            out, err = self.run_tool(cmd, simulate)
-            self.attack_log.append({
-                "type": "deauth",
-                "bssid": bssid,
-                "channel": channel,
-                "output": out,
-                "error": err,
-                "glyph": GLYPHS["deauth"],
-                "tier": TIERS["deauth"],
-                "timestamp": int(time.time())
-            })
-        finally:
-            self.disable_monitor_mode()
-
-    def capture_handshake(self, bssid, channel, duration=30, simulate=False, consent=True):
-        if not consent:
-            print("⛔ Consent not provided. Aborting handshake capture.")
-            return
-        self.enable_monitor_mode()
-        try:
-            filename = f"handshake_{bssid}_{int(time.time())}"
-            cmd = ["airodump-ng", "--bssid", bssid, "--channel", str(channel), "--write", filename, self.interface]
-            out, err = self.run_tool(cmd, simulate)
-            time.sleep(duration)
-            self.attack_log.append({
-                "type": "handshake",
-                "bssid": bssid,
-                "channel": channel,
-                "output": out,
-                "error": err,
-                "glyph": GLYPHS["handshake"],
-                "tier": TIERS["handshake"],
-                "timestamp": int(time.time())
-            })
-        finally:
-            self.disable_monitor_mode()
-
-    def capture_pmkid(self, simulate=False, consent=True):
-        if not consent:
-            print("⛔ Consent not provided. Aborting PMKID capture.")
-            return
-        self.enable_monitor_mode()
-        try:
-            cmd = ["hcxdumptool", "-i", self.interface, "--enable_status=1"]
-            out, err = self.run_tool(cmd, simulate)
-            self.attack_log.append({
-                "type": "pmkid",
-                "output": out,
-                "error": err,
-                "glyph": GLYPHS["pmkid"],
-                "tier": TIERS["pmkid"],
-                "timestamp": int(time.time())
-            })
-        finally:
-            self.disable_monitor_mode()
-
-# ╰─🕸️ End Chunk 3 ─╯
-
-# ╭─📜 Chunk 4: Audit Log Rendering ─╮
-
-    def render_attack_log(self):
-        print("\n╭─🧾 AgniShard Attack Log ─╮")
-        for entry in self.attack_log:
-            glyph = entry.get("glyph", "❔")
-            tier = entry.get("tier", "Unknown")
-            bssid = entry.get("bssid", "N/A")
-            channel = entry.get("channel", "N/A")
-            print(f"{glyph} [{entry['type'].upper()}] → BSSID: {bssid}, Channel: {channel}")
-            if entry["output"]:
-                print("  ↪ Output:", entry["output"].strip())
-            if entry["error"]:
-                print("  ⚠ Error:", entry["error"].strip())
-            print(f"  ⎋ Tier: {tier}")
-            print("  ──")
-        print("╰─🜂 End of Log ─╯\n")
-
-# ╰─🔮 End Chunk 4 ─╯
-
-# ╭─🧬 Chunk 5: Glyph Parser & Archetype Tagger ─╮
-
-    def parse_glyphs(self):
-        glyph_summary = {}
-        for entry in self.attack_log:
-            glyph = entry.get("glyph", "❔")
-            glyph_summary[glyph] = glyph_summary.get(glyph, 0) + 1
-        print("╭─🔣 Glyph Summary ─╮")
-        for glyph, count in glyph_summary.items():
-            print(f"  {glyph} × {count}")
-        print("╰─🜚 End Glyph Summary ─╯")
-
-    def tag_archetypes(self):
-        for entry in self.attack_log:
-            attack_type = entry["type"]
-            if attack_type == "deauth":
-                entry["archetype"] = "Disruptor"
-            elif attack_type == "handshake":
-                entry["archetype"] = "Harvester"
-            elif attack_type == "pmkid":
-                entry["archetype"] = "Extractor"
+            if module_path_or_name.endswith(".py") and Path(module_path_or_name).expanduser().exists():
+                p = Path(module_path_or_name).expanduser().resolve()
+                sys.path.insert(0, str(p.parent))
+                self.module = importlib.util.module_from_spec(
+                    spec := importlib.util.spec_from_file_location(p.stem, p)
+                )
+                assert spec and spec.loader
+                spec.loader.exec_module(self.module)  # type: ignore
             else:
-                entry["archetype"] = "Unknown"
-
-# ╰─🧿 End Chunk 5 ─╯
-
-# ╭─📦 Chunk 6: Relic Exporter ─╮
-
-    def export_log_json(self, filepath="agni_log.json"):
-        try:
-            with open(filepath, "w") as f:
-                json.dump(self.attack_log, f, indent=4)
-            print(f"✅ Log exported to JSON → {filepath}")
+                self.module = __import__(module_path_or_name)
         except Exception as e:
-            print(f"⚠️ Failed to export JSON: {e}")
-
-    def export_log_markdown(self, filepath="agni_log.md"):
-        try:
-            with open(filepath, "w") as f:
-                f.write("# 🔥 AgniShard Attack Log\n\n")
-                for entry in self.attack_log:
-                    glyph = entry.get("glyph", "❔")
-                    tier = entry.get("tier", "Unknown")
-                    archetype = entry.get("archetype", "Unassigned")
-                    bssid = entry.get("bssid", "N/A")
-                    channel = entry.get("channel", "N/A")
-                    f.write(f"## {glyph} {entry['type'].upper()}\n")
-                    f.write(f"- **BSSID**: {bssid}\n")
-                    f.write(f"- **Channel**: {channel}\n")
-                    f.write(f"- **Tier**: {tier}\n")
-                    f.write(f"- **Archetype**: {archetype}\n")
-                    if entry["output"]:
-                        f.write(f"- **Output**:\n```\n{entry['output'].strip()}\n```\n")
-                    if entry["error"]:
-                        f.write(f"- **Error**:\n```\n{entry['error'].strip()}\n```\n")
-                    f.write("\n---\n\n")
-            print(f"✅ Log exported to Markdown → {filepath}")
-        except Exception as e:
-            print(f"⚠️ Failed to export Markdown: {e}")
-
-# ╰─📜 End Chunk 6 ─╯
-
-# ╭─🛡️ Chunk 7: Consent Audit Renderer ─╮
-
-    def render_consent_audit(self):
-        print("\n╭─🧮 Consent & Simulation Audit ─╮")
-        for entry in self.attack_log:
-            attack = entry.get("type", "Unknown").upper()
-            glyph = entry.get("glyph", "❔")
-            bssid = entry.get("bssid", "N/A")
-            channel = entry.get("channel", "N/A")
-            output = entry.get("output", "")
-            error = entry.get("error", "")
-            simulated = "[DRY-RUN]" in output if output else False
-            consent = "⛔" not in output if output else True
-
-            print(f"{glyph} [{attack}] → BSSID: {bssid}, Channel: {channel}")
-            print(f"  ✅ Consent: {'Yes' if consent else 'No'}")
-            print(f"  🧪 Simulated: {'Yes' if simulated else 'No'}")
-            if error:
-                print(f"  ⚠ Error: {error.strip()}")
-            print("  ──")
-        print("╰─🜊 End Audit ─╯\n")
-
-# ╰─🧿 End Chunk 7 ─╯
-
-# ╭─🧾 Chunk 8: Symbolic Config Loader ─╮
-
-    def load_symbolic_config(self, filepath="agni_config.json"):
-        try:
-            with open(filepath, "r") as f:
-                config = json.load(f)
-
-            # Override symbolic maps
-            global GLYPHS, TIERS
-            GLYPHS.update(config.get("glyphs", {}))
-            TIERS.update(config.get("tiers", {}))
-
-            # Optional: load archetype map
-            self.archetype_map = config.get("archetypes", {})
-
-            print(f"✅ Symbolic config loaded from {filepath}")
-        except Exception as e:
-            print(f"⚠️ Failed to load symbolic config: {e}")
-
-    def apply_archetype_map(self):
-        if not hasattr(self, "archetype_map"):
-            print("⚠️ No archetype map loaded.")
-            return
-        for entry in self.attack_log:
-            attack_type = entry["type"]
-            entry["archetype"] = self.archetype_map.get(attack_type, "Unassigned")
-
-# ╰─🧿 End Chunk 8 ─╯
-
-# ╭─🖼️ Chunk 9: Mythic GUI Binder ─╮
-
-    def get_attack_summary(self):
-        summary = []
-        for entry in self.attack_log:
-            summary.append({
-                "type": entry["type"],
-                "bssid": entry.get("bssid", "N/A"),
-                "channel": entry.get("channel", "N/A"),
-                "glyph": entry.get("glyph", "❔"),
-                "tier": entry.get("tier", "Unknown"),
-                "archetype": entry.get("archetype", "Unassigned"),
-                "status": "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-            })
-        return summary
-
-    def get_glyph_counts(self):
-        counts = {}
-        for entry in self.attack_log:
-            glyph = entry.get("glyph", "❔")
-            counts[glyph] = counts.get(glyph, 0) + 1
-        return counts
-
-    def get_error_summary(self):
-        errors = []
-        for entry in self.attack_log:
-            if entry.get("error"):
-                errors.append({
-                    "type": entry["type"],
-                    "glyph": entry.get("glyph", "❔"),
-                    "error": entry["error"].strip()
-                })
-        return errors
-
-# ╰─🧿 End Chunk 9 ─╯
-
-# ╭─⏳ Chunk 10: Relic Scheduler ─╮
-
-    def schedule_attack(self, attack_fn, delay=10, *args, **kwargs):
-        def delayed_execution():
-            print(f"⏳ Waiting {delay} seconds before invoking {attack_fn.__name__}...")
-            time.sleep(delay)
-            attack_fn(*args, **kwargs)
-            print(f"✅ {attack_fn.__name__} executed.")
-
-        thread = threading.Thread(target=delayed_execution)
-        thread.start()
-
-    def batch_schedule(self, attack_plan):
-        """
-        attack_plan = [
-            {"fn": self.perform_deauth, "delay": 5, "args": [bssid, channel], "kwargs": {"simulate": True}},
-            {"fn": self.capture_handshake, "delay": 30, "args": [bssid, channel], "kwargs": {"simulate": False}},
-        ]
-        """
-        for task in attack_plan:
-            self.schedule_attack(task["fn"], task["delay"], *task.get("args", []), **task.get("kwargs", {}))
-
-# ╰─🜓 End Chunk 10 ─╯
-
-# ╭─🧿 Chunk 11: Symbolic Error Visualizer ─╮
-
-    def visualize_errors(self):
-        print("\n╭─⚠️ Symbolic Error Report ─╮")
-        for entry in self.attack_log:
-            error = entry.get("error")
-            if error:
-                glyph = entry.get("glyph", "❔")
-                attack = entry.get("type", "Unknown").upper()
-                archetype = entry.get("archetype", "Unassigned")
-                print(f"{glyph} [{attack}] → Archetype: {archetype}")
-                print(f"  ⚠ Error: {error.strip()}")
-                if "monitor" in error.lower():
-                    print("  🔍 Hint: Check if monitor mode was properly enabled or disabled.")
-                elif "permission" in error.lower():
-                    print("  🔐 Hint: Run with elevated privileges or verify tool access.")
-                elif "not found" in error.lower():
-                    print("  🧭 Hint: Ensure required tools are installed and in PATH.")
-                else:
-                    print("  🜁 Hint: Review command syntax or interface state.")
-                print("  ──")
-        print("╰─🜚 End Error Report ─╯\n")
-        
-# ╰─🧿 End Chunk 11 ─╯
-
-# ╭─🧿 Chunk 12: Mythic CLI Interface ─╮
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="🜂 AgniShard Relic Interface")
-    parser.add_argument("--interface", required=True, help="Wireless interface to use")
-    parser.add_argument("--deauth", action="store_true", help="Perform deauth attack")
-    parser.add_argument("--handshake", action="store_true", help="Capture handshake")
-    parser.add_argument("--pmkid", action="store_true", help="Capture PMKID")
-    parser.add_argument("--simulate", action="store_true", help="Dry-run mode")
-    parser.add_argument("--bssid", help="Target BSSID")
-    parser.add_argument("--channel", type=int, help="Target channel")
-    parser.add_argument("--export", choices=["json", "md"], help="Export log format")
-
-    args = parser.parse_args()
-    core = AgniShardCore(args.interface)
-
-    if args.deauth and args.bssid and args.channel:
-        core.perform_deauth(args.bssid, args.channel, simulate=args.simulate)
-
-    if args.handshake and args.bssid and args.channel:
-        core.capture_handshake(args.bssid, args.channel, simulate=args.simulate)
-
-    if args.pmkid:
-        core.capture_pmkid(simulate=args.simulate)
-
-    core.tag_archetypes()
-
-    if args.export == "json":
-        core.export_log_json()
-    elif args.export == "md":
-        core.export_log_markdown()
-
-    core.render_attack_log()
-    core.visualize_errors()
-            
-# ╭─🧿 Chunk 13: Relic Integrity Checker ─╮
-
-    def check_integrity(self):
-        print("\n╭─🧩 Relic Integrity Scan ─╮")
-        issues_found = False
-        for i, entry in enumerate(self.attack_log):
-            missing = []
-            for key in ["type", "glyph", "tier", "output", "error"]:
-                if key not in entry:
-                    missing.append(key)
-            if missing:
-                issues_found = True
-                print(f"❌ Entry {i} missing fields: {', '.join(missing)}")
-            elif entry["glyph"] not in GLYPHS.values():
-                issues_found = True
-                print(f"⚠️ Entry {i} has unknown glyph: {entry['glyph']}")
-            elif entry["tier"] not in TIERS.values():
-                issues_found = True
-                print(f"⚠️ Entry {i} has unknown tier: {entry['tier']}")
-        if not issues_found:
-            print("✅ All entries structurally sound.")
-        print("╰─🜎 End Integrity Scan ─╯\n")
-        
-# ╰─🧿 End Chunk 13 ─╯
-
-   # ╭─📜 Chunk 14: YAML Ritual Loader ─╮
-
-    def load_ritual_yaml(self, filepath="ritual.yaml"):
-        try:
-            import yaml
-        except ImportError:
-            print("⚠️ PyYAML not installed. Run: pip install pyyaml")
-            return
-
-        try:
-            with open(filepath, "r") as f:
-                ritual = yaml.safe_load(f)
-
-            for step in ritual.get("sequence", []):
-                fn_name = step.get("action")
-                delay = step.get("delay", 0)
-                args = step.get("args", [])
-                kwargs = step.get("kwargs", {})
-                fn = getattr(self, fn_name, None)
-                if callable(fn):
-                    self.schedule_attack(fn, delay, *args, **kwargs)
-                else:
-                    print(f"⚠️ Unknown ritual action: {fn_name}")
-        except Exception as e:
-            print(f"⚠️ Failed to load ritual YAML: {e}")
-            
-# ╰─🜚 End Chunk 14 ─╯
-
-         # ╭─🧿 Chunk 15: Symbolic Dashboard Generator ─╮
-
-    def render_dashboard(self):
-        glyph_counts = self.get_glyph_counts()
-        archetype_counts = {}
-        for entry in self.attack_log:
-            archetype = entry.get("archetype", "Unassigned")
-            archetype_counts[archetype] = archetype_counts.get(archetype, 0) + 1
-
-        print("\n╭─📊 AgniShard Symbolic Dashboard ─╮")
-        print("🜂 Glyph Usage:")
-        for glyph, count in glyph_counts.items():
-            print(f"  {glyph} × {count}")
-
-        print("\n🧬 Archetype Distribution:")
-        for archetype, count in archetype_counts.items():
-            print(f"  {archetype} × {count}")
-
-        print("\n🧪 Simulation Summary:")
-        simulated = sum(1 for e in self.attack_log if "[DRY-RUN]" in str(e.get("output", "")))
-        executed = len(self.attack_log) - simulated
-        print(f"  Simulated: {simulated}")
-        print(f"  Executed: {executed}")
-        print("╰─🜎 End Dashboard ─╯\n")
-        
-# ╰─🧿 End Chunk 15 ─╯
-
-# ╭─📦 Chunk 16: Relic Archive Compressor ─╮
-
-    def compress_relic_archive(self, archive_name=None):
-        import zipfile
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive_name = archive_name or f"agni_relic_{timestamp}.zip"
-
-        files_to_include = [
-            "agni_log.json",
-            "agni_log.md",
-            "agni_config.json",
-            "ritual.yaml"
-        ]
-
-        try:
-            with zipfile.ZipFile(archive_name, "w") as zipf:
-                for file in files_to_include:
-                    if os.path.exists(file):
-                        zipf.write(file)
-                        print(f"📦 Added: {file}")
-                    else:
-                        print(f"⚠️ Skipped (not found): {file}")
-            print(f"✅ Relic archive created → {archive_name}")
-        except Exception as e:
-            print(f"⚠️ Failed to create archive: {e}")
-
-# ╰─🜓 End Chunk 16 ─╯
-
-# ╭─🔔 Chunk 17: Mythic Notification Engine ─╮
-
-    def notify(self, message, glyph="🔔", level="info"):
-        levels = {
-            "info": "🟢",
-            "warn": "🟠",
-            "error": "🔴",
-            "success": "🟣"
-        }
-        prefix = levels.get(level, "🟢")
-        print(f"{glyph} {prefix} {message}")
-
-    def notify_on_attack(self, entry):
-        glyph = entry.get("glyph", "❔")
-        attack = entry.get("type", "Unknown").upper()
-        status = "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-        self.notify(f"{glyph} [{attack}] → {status}", glyph=glyph, level="success")
-
-    def notify_on_error(self, entry):
-        if entry.get("error"):
-            glyph = entry.get("glyph", "❔")
-            attack = entry.get("type", "Unknown").upper()
-            self.notify(f"{glyph} [{attack}] ⚠ Error: {entry['error'].strip()}", glyph=glyph, level="error")
-
-    def notify_on_archive(self, archive_name):
-        self.notify(f"📦 Relic archive created → {archive_name}", glyph="📦", level="success")
-        
-# ╰─🜚 End Chunk 17 ─╯
-
-# ╭─🧿 Chunk 18: Symbolic Threat Mapper ─╮
-
-    def map_threat_profile(self):
-        profile = {
-            "Disruptor": 0,
-            "Harvester": 0,
-            "Extractor": 0,
-            "Unassigned": 0
-        }
-
-        for entry in self.attack_log:
-            archetype = entry.get("archetype", "Unassigned")
-            profile[archetype] = profile.get(archetype, 0) + 1
-
-        total = sum(profile.values())
-        print("\n╭─🧠 Symbolic Threat Profile ─╮")
-        for archetype, count in profile.items():
-            percent = (count / total * 100) if total else 0
-            glyph = {
-                "Disruptor": "🧨",
-                "Harvester": "📡",
-                "Extractor": "🧬",
-                "Unassigned": "❔"
-            }.get(archetype, "❔")
-            print(f"{glyph} {archetype}: {count} ({percent:.1f}%)")
-        print("╰─🜎 End Threat Profile ─╯\n")
-# ╰─🧿 End Chunk 18 ─╯
-
-# ╭─🧿 Chunk 19: Relic Integrity Verifier ─╮
-
-    def verify_file_hash(self, filepath, algorithm="sha256"):
-        import hashlib
-
-        if not os.path.exists(filepath):
-            print(f"⚠️ File not found: {filepath}")
-            return None
-
-        try:
-            hash_func = getattr(hashlib, algorithm)
-        except AttributeError:
-            print(f"⚠️ Unsupported hash algorithm: {algorithm}")
-            return None
-
-        hasher = hash_func()
-        with open(filepath, "rb") as f:
-            while chunk := f.read(8192):
-                hasher.update(chunk)
-
-        digest = hasher.hexdigest()
-        print(f"🔐 {algorithm.upper()} hash for {filepath}: {digest}")
-        return digest
-
-    def verify_relic_bundle(self, files=None, algorithm="sha256"):
-        files = files or [
-            "agni_log.json",
-            "agni_log.md",
-            "agni_config.json",
-            "ritual.yaml"
-        ]
-        print("\n╭─🧿 Relic Hash Verification ─╮")
-        for file in files:
-            self.verify_file_hash(file, algorithm=algorithm)
-        print("╰─🜎 End Verification ─╯\n")
-        
-# ╰─🧿 End Chunk 19 ─╯
-
-# ╭─🌐 Chunk 20: Mythic Webhook Dispatcher ─╮
-
-    def dispatch_webhook(self, url, payload):
-        import requests
-        try:
-            response = requests.post(url, json=payload, timeout=5)
-            status = response.status_code
-            if status == 200:
-                print(f"🌐 Webhook dispatched successfully → {url}")
-            else:
-                print(f"⚠️ Webhook failed with status {status}")
-        except Exception as e:
-            print(f"⚠️ Webhook dispatch error: {e}")
-
-    def notify_attack_webhook(self, entry, url):
-        payload = {
-            "type": entry.get("type"),
-            "glyph": entry.get("glyph"),
-            "tier": entry.get("tier"),
-            "archetype": entry.get("archetype", "Unassigned"),
-            "status": "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed",
-            "timestamp": datetime.now().isoformat()
-        }
-        self.dispatch_webhook(url, payload)
-
-    def notify_archive_webhook(self, archive_name, url):
-        payload = {
-            "event": "archive_created",
-            "file": archive_name,
-            "timestamp": datetime.now().isoformat()
-        }
-        self.dispatch_webhook(url, payload)
-        
-# ╰─🜚 End Chunk 20 ─╯
-
-# ╭─🕰️ Chunk 21: Symbolic Timeline Renderer ─╮
-
-    def render_timeline(self):
-        print("\n╭─📜 AgniShard Symbolic Timeline ─╮")
-        sorted_log = sorted(self.attack_log, key=lambda e: e.get("timestamp", 0))
-
-        for entry in sorted_log:
-            glyph = entry.get("glyph", "❔")
-            attack = entry.get("type", "Unknown").upper()
-            archetype = entry.get("archetype", "Unassigned")
-            ts = entry.get("timestamp", int(time.time()))
-            readable = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-            status = "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-
-            print(f"{readable} → {glyph} [{attack}] • {archetype} • {status}")
-        print("╰─🜎 End Timeline ─╯\n")
-# ╰─🧿 End Chunk 21 ─╯
-
-# ╭─🔁 Chunk 22: Relic Resurrection Engine ─╮
-
-    def resurrect_from_archive(self, archive_path="agni_relic.zip"):
-        import zipfile
-        try:
-            with zipfile.ZipFile(archive_path, "r") as zipf:
-                zipf.extractall()
-                print(f"🧙 Relic resurrected from → {archive_path}")
-        except Exception as e:
-            print(f"⚠️ Resurrection failed: {e}")
-            
-# ╰─🜚 End Chunk 22 ─╯
-
-# ╭─🔊 Chunk 23: Mythic Voice Synthesizer ─╮
-
-    def speak_log_entry(self, entry):
-        try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            glyph = entry.get("glyph", "❔")
-            attack = entry.get("type", "Unknown").upper()
-            archetype = entry.get("archetype", "Unassigned")
-            status = "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-            message = f"{glyph} {attack} performed as {archetype}. Status: {status}."
-            engine.say(message)
-            engine.runAndWait()
-        except Exception as e:
-            print(f"⚠️ Voice synthesis failed: {e}")
-            
-# ╰─🜚 End Chunk 23 ─╯
-
-# ╭─🧿 Chunk 24–25: Visualization Hooks + Archetype Balancer ─╮
-
-    def get_visualization_data(self):
-        data = {
-            "glyphs": self.get_glyph_counts(),
-            "archetypes": {},
-            "timeline": []
-        }
-
-        for entry in self.attack_log:
-            archetype = entry.get("archetype", "Unassigned")
-            data["archetypes"][archetype] = data["archetypes"].get(archetype, 0) + 1
-
-            ts = entry.get("timestamp", int(time.time()))
-            readable = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-            data["timeline"].append({
-                "time": readable,
-                "glyph": entry.get("glyph", "❔"),
-                "type": entry.get("type", "Unknown").upper(),
-                "archetype": archetype,
-                "status": "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-            })
-
-        return data
-
-    def suggest_archetype_balance(self):
-        counts = {}
-        for entry in self.attack_log:
-            archetype = entry.get("archetype", "Unassigned")
-            counts[archetype] = counts.get(archetype, 0) + 1
-
-        total = sum(counts.values())
-        ideal = total // 3 if total else 0
-        print("\n╭─⚖️ Archetype Balance Suggestion ─╮")
-        for archetype in ["Disruptor", "Harvester", "Extractor"]:
-            actual = counts.get(archetype, 0)
-            delta = ideal - actual
-            glyph = {
-                "Disruptor": "🧨",
-                "Harvester": "📡",
-                "Extractor": "🧬"
-            }.get(archetype, "❔")
-            if delta > 0:
-                print(f"{glyph} {archetype}: Add {delta} more to balance.")
-            elif delta < 0:
-                print(f"{glyph} {archetype}: Reduce by {-delta} for equilibrium.")
-            else:
-                print(f"{glyph} {archetype}: Balanced.")
-        print("╰─🜎 End Suggestion ─╯\n")
-        
-# ╰─🧿 End Chunk 24–25 ─╯
-
-# ╭─🧿 Chunk 26–27: Manifest Generator + Mythic API ─╮
-
-    def generate_manifest(self, filepath="agni_manifest.json"):
-        manifest = {
-            "created": datetime.now().isoformat(),
-            "total_attacks": len(self.attack_log),
-            "glyphs": self.get_glyph_counts(),
-            "archetypes": {},
-            "hashes": {}
-        }
-
-        for entry in self.attack_log:
-            archetype = entry.get("archetype", "Unassigned")
-            manifest["archetypes"][archetype] = manifest["archetypes"].get(archetype, 0) + 1
-
-        for file in ["agni_log.json", "agni_log.md", "agni_config.json"]:
-            digest = self.verify_file_hash(file)
-            if digest:
-                manifest["hashes"][file] = digest
-
-        try:
-            with open(filepath, "w") as f:
-                json.dump(manifest, f, indent=4)
-            print(f"📜 Manifest generated → {filepath}")
-        except Exception as e:
-            print(f"⚠️ Manifest generation failed: {e}")
-
-    def launch_api(self, port=8080):
-        try:
-            from flask import Flask, jsonify
-
-            app = Flask("AgniShardAPI")
-
-            @app.route("/glyphs")
-            def glyphs():
-                return jsonify(self.get_glyph_counts())
-
-            @app.route("/archetypes")
-            def archetypes():
-                counts = {}
-                for entry in self.attack_log:
-                    archetype = entry.get("archetype", "Unassigned")
-                    counts[archetype] = counts.get(archetype, 0) + 1
-                return jsonify(counts)
-
-            @app.route("/timeline")
-            def timeline():
-                return jsonify(self.get_visualization_data()["timeline"])
-
-            print(f"🌐 AgniShard API running on port {port}")
-            app.run(port=port)
-
-        except Exception as e:
-            print(f"⚠️ API launch failed: {e}")
-
-# ╰─🜚 End Chunk 26–27 ─╯
-
-# ╭─🛡️ Chunk 28–30: Guardian + Signature + Lore ─╮
-
-    def enforce_guardrails(self, entry):
-        if not entry.get("consent", True):
-            print(f"⛔ Consent missing for {entry['type']}. Switching to dry-run.")
-            entry["simulate"] = True
-            entry["output"] = "[DRY-RUN] Consent not provided."
-            entry["error"] = None
-            entry["glyph"] = GLYPHS.get(entry["type"], "❔")
-            entry["tier"] = TIERS.get(entry["type"], "Unknown")
-            entry["timestamp"] = int(time.time())
-            entry["archetype"] = self.archetype_map.get(entry["type"], "Unassigned")
-            self.attack_log.append(entry)
-
-    def sign_manifest(self, manifest_path="agni_manifest.json", key_path="private.pem"):
-        try:
-            from cryptography.hazmat.primitives import hashes, serialization
-            from cryptography.hazmat.primitives.asymmetric import padding
-            from cryptography.hazmat.backends import default_backend
-
-            with open(manifest_path, "rb") as f:
-                data = f.read()
-            with open(key_path, "rb") as kf:
-                private_key = serialization.load_pem_private_key(kf.read(), password=None, backend=default_backend())
-
-            signature = private_key.sign(
-                data,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-                hashes.SHA256()
-            )
-
-            sig_path = manifest_path.replace(".json", ".sig")
-            with open(sig_path, "wb") as sf:
-                sf.write(signature)
-            print(f"🔏 Manifest signed → {sig_path}")
-        except Exception as e:
-            print(f"⚠️ Signature failed: {e}")
-
-    def compile_lore(self, filepath="agni_lore.md"):
-        try:
-            with open(filepath, "w") as f:
-                f.write("# 🔥 AgniShard Relic Lore\n\n")
-                f.write(f"**Created**: {datetime.now().isoformat()}\n\n")
-                f.write("## Glyphic Summary\n")
-                for glyph, count in self.get_glyph_counts().items():
-                    f.write(f"- {glyph} × {count}\n")
-
-                f.write("\n## Archetypal Spread\n")
-                archetypes = {}
-                for entry in self.attack_log:
-                    archetype = entry.get("archetype", "Unassigned")
-                    archetypes[archetype] = archetypes.get(archetype, 0) + 1
-                for archetype, count in archetypes.items():
-                    f.write(f"- {archetype} × {count}\n")
-
-                f.write("\n## Ritual Timeline\n")
-                for entry in sorted(self.attack_log, key=lambda e: e.get("timestamp", 0)):
-                    ts = datetime.fromtimestamp(entry.get("timestamp", int(time.time()))).strftime("%Y-%m-%d %H:%M:%S")
-                    glyph = entry.get("glyph", "❔")
-                    attack = entry.get("type", "Unknown").upper()
-                    status = "Simulated" if "[DRY-RUN]" in str(entry.get("output", "")) else "Executed"
-                    f.write(f"- {ts} → {glyph} {attack} • {status}\n")
-
-            print(f"📜 Lore compiled → {filepath}")
-        except Exception as e:
-            print(f"⚠️ Lore compilation failed: {e}")
-
-# ╰─🜚 End Chunk 28–30 ─╯
-
-# ╭─🜂 Relic Invocation Entry ─╮
-if __name__ == "__main__":
-    core = AgniShardCore("wlan0")
-    core.load_symbolic_config()
-    core.tag_archetypes()
-    core.render_dashboard()
-    core.render_timeline()
-    core.generate_manifest()
-    core.compile_lore()
-    core.compress_relic_archive()
-    core.verify_relic_bundle()
-    print("🔚 AgniShard relic sealed and invoked.")
-# ╰─🜎 End of Relic ─╯
-   
-   # ╭─🛡️ Chunk 31: Relic Recovery Engine ─╮
-
-    def recover_attack_log(self, filepath="agni_log.json"):
-        try:
-            with open(filepath, "r") as f:
-                log = json.load(f)
-        except Exception as e:
-            print(f"⚠️ Failed to load attack log: {e}")
-            return
-
-        repaired = []
-        for i, entry in enumerate(log):
-            fixed = entry.copy()
-            missing = []
-
-            for key in ["type", "glyph", "tier", "output", "error", "timestamp"]:
-                if key not in fixed:
-                    missing.append(key)
-                    if key == "type":
-                        fixed[key] = "unknown"
-                    elif key == "glyph":
-                        fixed[key] = GLYPHS.get(fixed.get("type", "unknown"), "❔")
-                    elif key == "tier":
-                        fixed[key] = TIERS.get(fixed.get("type", "unknown"), "Relic")
-                    elif key == "output":
-                        fixed[key] = "[RECOVERED] No output"
-                    elif key == "error":
-                        fixed[key] = None
-                    elif key == "timestamp":
-                        fixed[key] = int(time.time())
-
-            if "archetype" not in fixed:
-                fixed["archetype"] = self.archetype_map.get(fixed["type"], "Unassigned")
-
-            if missing:
-                print(f"🛠️ Entry {i} repaired → Missing: {', '.join(missing)}")
-
-            repaired.append(fixed)
-
-        self.attack_log = repaired
-        print(f"✅ Attack log recovered and loaded → {filepath}")
-
-    def recover_config(self, filepath="agni_config.json"):
-        if not os.path.exists(filepath):
-            print(f"⚠️ Config missing. Regenerating default → {filepath}")
-            default_config = {
-                "glyphs": GLYPHS,
-                "tiers": TIERS,
-                "archetypes": {
-                    "deauth": "Disruptor",
-                    "handshake": "Harvester",
-                    "pmkid": "Extractor"
-                }
-            }
-            try:
-                with open(filepath, "w") as f:
-                    json.dump(default_config, f, indent=4)
-                print("✅ Default config regenerated.")
-            except Exception as e:
-                print(f"⚠️ Failed to regenerate config: {e}")
+            LOGGER.error(f"Failed to load core module: {e}")
+            self.module = None
+        finally:
+            # best-effort cleanup; sys.path insertion only when file path used
+            pass
+    def bind(self, name_in_gui: str, fallback: Optional[CoreFunc] = None) -> None:
+        fn = None
+        if self.module is not None:
+            fn = getattr(self.module, name_in_gui, None)
+        self.funcs[name_in_gui] = fn or fallback
+    def ensure(self, name: str):
+        if name not in self.funcs:
+            self.funcs[name] = None
+    def call(self, name: str, *args, **kwargs):
+        fn = self.funcs.get(name)
+        if fn is None:
+            raise RuntimeError(f"Core function '{name}' is not bound.")
+        return fn(*args, **kwargs)
+
+CORE = CoreBridge()
+
+# Placeholders (safe no-ops) — replaced if your core provides real ones
+def _noop_scan_networks(interface: str): LOGGER.info(f"[noop] scan_networks({interface})"); return []
+def _noop_capture_handshake(interface: str, bssid: Optional[str] = None, channel: Optional[int] = None):
+    LOGGER.info(f"[noop] capture_handshake({interface}, {bssid}, {channel})"); return None
+def _noop_crack_handshake(cap_file: Path, wordlist: Path, bssid: Optional[str] = None):
+    LOGGER.info(f"[noop] crack_handshake({cap_file}, {wordlist}, {bssid})"); return {"status": "noop"}
+def _noop_stop_operations(): LOGGER.info("[noop] stop_operations()")
+
+# Pre-register names; actual functions injected after core load
+for name in ("scan_networks", "capture_handshake", "crack_handshake", "stop_operations"):
+    CORE.ensure(name)
+
+# ---------- Interfaces (safe + aggressive on Kali) ----------
+def list_interfaces_safe() -> list[str]:
+    names: set[str] = set()
+    try:
+        net_dir = Path("/sys/class/net")
+        if net_dir.exists():
+            for p in net_dir.iterdir():
+                if p.name != "lo":
+                    names.add(p.name)
+    except Exception as e:
+        LOGGER.error(f"Interface enumeration error: {e}")
+    return sorted(names)
+
+def list_interfaces_aggressive() -> list[str]:
+    out = []
+    try:
+        res = subprocess.run(["iw", "dev"], capture_output=True, text=True, check=False)
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Interface "):
+                out.append(line.split()[1])
+    except Exception as e:
+        LOGGER.error(f"iw dev parsing error: {e}")
+    return sorted(set(out))
+
+def list_interfaces_combined() -> list[str]:
+    lst = list_interfaces_safe()
+    if not lst: lst = list_interfaces_aggressive()
+    LOGGER.info(f"Interfaces discovered: {lst}")
+    return lst
+# ---------- Tk app shell ----------
+class EchoFrameApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_NAME)
+        self.geometry("1024x720")
+        self.minsize(900, 600)
+
+        theme_name = SETTINGS.get("theme", DEFAULT_THEME)
+        self.theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+        self.configure(bg=self.theme["bg"])
+
+        # State
+        self.interface_var = tk.StringVar()
+        self.cap_file_var = tk.StringVar(value=SETTINGS["last_paths"].get("cap", ""))
+        self.wordlist_var = tk.StringVar(value=SETTINGS["last_paths"].get("wordlist", ""))
+        self.bssid_var = tk.StringVar(value=SETTINGS["last_paths"].get("bssid", ""))
+        self.theme_var = tk.StringVar(value=theme_name)
+        self._op_thread: Optional[threading.Thread] = None
+        self._op_lock = threading.Lock()
+
+        # Style
+        self.style = ttk.Style(self)
+        # use a neutral ttk theme for predictability on Kali
+        try: self.style.theme_use("clam")
+        except Exception: pass
+        self._apply_theme_style()
+
+        # Layout scaffold
+        self._build_layout()
+
+        # Deferred gate + core load
+        self.after(100, self._gate_and_load_core)
+
+    def _apply_theme_style(self):
+        t = self.theme
+        self.style.configure("TLabel", background=t["bg"], foreground=t["fg"], font=("Segoe UI", 10))
+        self.style.configure("TButton", font=("Segoe UI", 10))
+        self.style.configure("TEntry", fieldbackground=t["panel"], foreground=t["fg"])
+        self.style.configure("TCombobox", fieldbackground=t["panel"], foreground=t["fg"])
+        self.style.map("TButton",
+            background=[("active", t["accent"])],
+            foreground=[("active", t["fg"])],
+            relief=[("pressed", "sunken"), ("!pressed", "raised")]
+        )
+
+    def _build_layout(self):
+        # Top banner
+        banner = tk.Frame(self, bg=self.theme["panel"], height=44)
+        banner.pack(side="top", fill="x")
+        tk.Label(banner, text=APP_NAME, bg=self.theme["panel"], fg=self.theme["accent"],
+                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=10)
+        tk.Label(banner, text=SAFETY_BANNER, bg=self.theme["panel"], fg=self.theme["muted"],
+                 font=("Segoe UI", 9)).pack(side="right", padx=10)
+
+        # Content split
+        self.content_frame = tk.Frame(self, bg=self.theme["bg"])
+        self.content_frame.pack(side="top", fill="both", expand=True)
+
+        self.controls_frame = tk.Frame(self.content_frame, bg=self.theme["panel"], width=320)
+        self.controls_frame.pack(side="left", fill="y")
+        self.controls_frame.pack_propagate(False)
+
+        self.output_frame = tk.Frame(self.content_frame, bg=self.theme["bg"])
+        self.output_frame.pack(side="left", fill="both", expand=True)
+
+    def _gate_and_load_core(self):
+        if not owner_gate_flow(self, self.theme):
+            self.destroy(); return
+
+        # Load user's core module if set
+        core_mod = SETTINGS.get("core_module", "").strip()
+        if core_mod:
+            CORE.load(core_mod)
         else:
-            print("✅ Config file exists. No recovery needed.")
+            LOGGER.info("No core_module set. Using safe no-ops. Set SETTINGS['core_module'] to integrate your script.")
 
-# ╰─🜚 End Chunk 31 ─╯     
+        # Bind expected functions: prefer real module attrs, else no-ops
+        CORE.bind("scan_networks", _noop_scan_networks)
+        CORE.bind("capture_handshake", _noop_capture_handshake)
+        CORE.bind("crack_handshake", _noop_crack_handshake)
+        CORE.bind("stop_operations", _noop_stop_operations)
+        LOGGER.info("Core functions bound.")
 
+        # Finish UI
+        self._init_after_gate()
+
+    # ---------- Post-gate population hooks (implemented in next chunks) ----------
+    def _init_after_gate(self): ...
+    def _populate_controls(self): ...
+    def _populate_output(self): ...
+    # ---------- Controls population ----------
+    def _populate_controls(self):
+        t = self.theme; f = self.controls_frame
+
+        # Interface selector
+        tk.Label(f, text="🧠 Interface Glyph", bg=t["panel"], fg=t["fg"], font=("Segoe UI", 10, "bold"))\
+            .pack(anchor="w", padx=8, pady=(10, 2))
+        self.iface_combo = ttk.Combobox(f, textvariable=self.interface_var,
+                                        values=list_interfaces_combined(), state="readonly")
+        self.iface_combo.pack(fill="x", padx=8, pady=(0, 8))
+
+        # Capture file
+        tk.Label(f, text="📂 Capture File (.cap)", bg=t["panel"], fg=t["fg"], font=("Segoe UI", 10, "bold"))\
+            .pack(anchor="w", padx=8, pady=(8, 2))
+        cap_frame = tk.Frame(f, bg=t["panel"]); cap_frame.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Entry(cap_frame, textvariable=self.cap_file_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(cap_frame, text="Browse", command=self._browse_cap).pack(side="left", padx=(4, 0))
+
+        # Wordlist
+        tk.Label(f, text="🔐 Passphrase File", bg=t["panel"], fg=t["fg"], font=("Segoe UI", 10, "bold"))\
+            .pack(anchor="w", padx=8, pady=(8, 2))
+        wl_frame = tk.Frame(f, bg=t["panel"]); wl_frame.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Entry(wl_frame, textvariable=self.wordlist_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(wl_frame, text="Browse", command=self._browse_wordlist).pack(side="left", padx=(4, 0))
+
+        # BSSID
+        tk.Label(f, text="📡 Target BSSID", bg=t["panel"], fg=t["fg"], font=("Segoe UI", 10, "bold"))\
+            .pack(anchor="w", padx=8, pady=(8, 2))
+        ttk.Entry(f, textvariable=self.bssid_var).pack(fill="x", padx=8, pady=(0, 8))
+
+        # Theme selector
+        tk.Label(f, text="🕯️ Theme Epoch", bg=t["panel"], fg=t["fg"], font=("Segoe UI", 10, "bold"))\
+            .pack(anchor="w", padx=8, pady=(8, 2))
+        self.theme_combo = ttk.Combobox(f, textvariable=self.theme_var, values=list(THEMES.keys()), state="readonly")
+        self.theme_combo.pack(fill="x", padx=8, pady=(0, 8))
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_selected_theme())
+
+        # Buttons
+        self.invoke_btn = ttk.Button(f, text="🔮 Invoke Ritual", command=self._invoke_ritual)
+        self.invoke_btn.pack(fill="x", padx=8, pady=(12, 6))
+        self.stop_btn = ttk.Button(f, text="⏹ Stop Ritual", command=self._stop_ritual)
+        self.stop_btn.pack(fill="x", padx=8, pady=(0, 12))
+
+    def _browse_cap(self):
+        file = filedialog.askopenfilename(filetypes=[("Capture Files", "*.cap"), ("All Files", "*.*")])
+        if file:
+            p = Path(file).expanduser()
+            self.cap_file_var.set(str(p))
+            SETTINGS["last_paths"]["cap"] = str(p); save_settings(SETTINGS)
+
+    def _browse_wordlist(self):
+        file = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+        if file:
+            p = Path(file).expanduser()
+            self.wordlist_var.set(str(p))
+            SETTINGS["last_paths"]["wordlist"] = str(p); save_settings(SETTINGS)
+
+    # ---------- Output/log panel ----------
+    def _populate_output(self):
+        t = self.theme; f = self.output_frame
+        self.log_text = tk.Text(f, bg=t["bg"], fg=t["fg"], insertbackground=t["accent"], wrap="word", state="disabled")
+        self.log_text.pack(side="top", fill="both", expand=True, padx=4, pady=4)
+        # Tags
+        self.log_text.config(state="normal")
+        self.log_text.tag_config("info", foreground=t["fg"])
+        self.log_text.tag_config("error", foreground=t["error"])
+        self.log_text.tag_config("ok", foreground=t["ok"])
+        self.log_text.config(state="disabled")
+
+        # Controls under log
+        ctrl = tk.Frame(f, bg=t["panel"]); ctrl.pack(side="bottom", fill="x")
+        ttk.Button(ctrl, text="💾 Save Log", command=self._save_current_log).pack(side="left", padx=4, pady=4)
+        ttk.Button(ctrl, text="🧹 Clear", command=self._clear_log).pack(side="left", padx=4, pady=4)
+        ttk.Button(ctrl, text="📜 Archive Now", command=archive_log_if_needed).pack(side="left", padx=4, pady=4)
+
+        # Start polling queue
+        self.after(300, self._poll_log_queue)
+
+    def _append_log_line(self, line: str):
+        tag = "info"
+        ll = line.lower()
+        if "error" in ll or "fail" in ll: tag = "error"
+        elif "success" in ll or "ok" in ll: tag = "ok"
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", line + "\n", tag)
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _poll_log_queue(self):
+        while not GUI_LOG_QUEUE.empty():
+            try: msg = GUI_LOG_QUEUE.get_nowait()
+            except queue.Empty: break
+            else: self._append_log_line(msg)
+        self.after(300, self._poll_log_queue)
+
+    def _save_current_log(self):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_file = ARCHIVE_DIR / f"log_{ts}.txt"
+        try:
+            text = self.log_text.get("1.0", "end").strip()
+            out_file.write_text(text, encoding="utf-8")
+            LOGGER.info(f"Log saved to {out_file}")
+            messagebox.showinfo("Log Saved", f"Saved to {out_file}")
+        except Exception as e:
+            LOGGER.error(f"Saving log failed: {e}")
+            messagebox.showerror("Save Failed", str(e))
+
+    def _clear_log(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+    # ---------- Invocation (threaded) ----------
+    def _set_controls_state(self, enabled: bool):
+        state = ("!disabled" if enabled else "disabled")
+        for w in (self.invoke_btn, self.stop_btn, self.iface_combo, self.theme_combo):
+            try:
+                if isinstance(w, ttk.Combobox):
+                    w.configure(state=("readonly" if enabled else "disabled"))
+                else:
+                    w.state([state])
+            except Exception:
+                pass
+
+    def _invoke_ritual(self):
+        iface = self.interface_var.get().strip()
+        cap_path = Path(self.cap_file_var.get().strip()).expanduser()
+        wordlist_path = Path(self.wordlist_var.get().strip()).expanduser()
+        bssid = self.bssid_var.get().strip()
+        theme_epoch = self.theme_var.get()
+
+        if not iface:
+            messagebox.showwarning("Missing Interface", "No interface glyph selected.")
+            LOGGER.warning("Invocation aborted: interface missing."); return
+        if not cap_path.exists():
+            messagebox.showwarning("Missing .cap", "Capture file not found.")
+            LOGGER.warning("Invocation aborted: .cap missing."); return
+        if not wordlist_path.exists():
+            messagebox.showwarning("Missing Passphrase File", "Wordlist file not found.")
+            LOGGER.warning("Invocation aborted: passphrase file missing."); return
+
+        LOGGER.info(f"🔮 Ritual invoked | iface={iface} bssid={bssid or '<none>'} theme={theme_epoch}")
+
+        def worker():
+            try:
+                nets = CORE.call("scan_networks", iface)
+                LOGGER.info(f"Scan returned {len(nets) if isinstance(nets, (list, tuple)) else 'unknown'} network(s).")
+
+                cap_result = CORE.call("capture_handshake", iface, bssid if bssid else None)
+                LOGGER.info(f"Handshake capture result: {cap_result}")
+
+                crack_result = CORE.call("crack_handshake", cap_path, wordlist_path, bssid if bssid else None)
+                LOGGER.info(f"Crack result: {crack_result}")
+
+                ok = isinstance(crack_result, dict) and crack_result.get("status") == "success"
+                if ok:
+                    key = crack_result.get("key", "<unknown>")
+                    LOGGER.info(f"✨ Success — Seal phrase recovered: {key}")
+                    self._enqueue_ui(lambda: self._survivability_feedback(True, "Ritual completed."))
+                else:
+                    LOGGER.warning(f"⚠️ Ritual did not yield a key — result={crack_result}")
+                    self._enqueue_ui(lambda: self._survivability_feedback(False, "No key recovered."))
+            except Exception as e:
+                LOGGER.error(f"Ritual execution error: {e}")
+                self._enqueue_ui(lambda: messagebox.showerror("Invocation Error", f"{e}"))
+            finally:
+                self._enqueue_ui(lambda: self._set_controls_state(True))
+                with self._op_lock: self._op_thread = None
+
+        with self._op_lock:
+            if self._op_thread is not None:
+                messagebox.showinfo("Busy", "A ritual is already in progress."); return
+            self._set_controls_state(False)
+            self._op_thread = threading.Thread(target=worker, name="RitualWorker", daemon=True)
+            self._op_thread.start()
+
+    def _enqueue_ui(self, fn: Callable[[], None], delay_ms: int = 0):
+        try:
+            self.after(delay_ms, fn)
+        except Exception:
+            pass
+
+    # ---------- Stop capability ----------
+    def _stop_ritual(self):
+        try:
+            CORE.call("stop_operations")
+            LOGGER.info("⏹ Ritual halted by operator.")
+            self._survivability_feedback(False, "Halted mid-stream.")
+        except Exception as e:
+            LOGGER.error(f"Stop operation error: {e}")
+            messagebox.showerror("Stop Failed", str(e))
+
+    def _survivability_feedback(self, success: bool, reason: str = ""):
+        if success:
+            msg = f"🛡️ Ritual completed. Survivability confirmed.\n{reason}"
+            LOGGER.info(f"Feedback: {msg}")
+            messagebox.showinfo("EchoFrame", msg)
+        else:
+            msg = f"⚠️ Ritual incomplete — calibration required.\n{reason}"
+            LOGGER.warning(f"Feedback: {msg}")
+            messagebox.showwarning("EchoFrame", msg)
+
+    # ---------- Theme switching ----------
+    def _apply_selected_theme(self):
+        theme_name = self.theme_var.get()
+        if theme_name not in THEMES:
+            LOGGER.warning(f"Unknown theme: {theme_name}, defaulting to {DEFAULT_THEME}")
+            theme_name = DEFAULT_THEME
+        self.theme = THEMES[theme_name]
+        SETTINGS["theme"] = theme_name; save_settings(SETTINGS)
+        self.configure(bg=self.theme["bg"])
+        self._apply_theme_style()
+        for w in self.winfo_children():
+            self._recolor_widget(w)
+        LOGGER.info(f"Theme switched to: {theme_name}")
+
+    def _recolor_widget(self, widget):
+        try:
+            if isinstance(widget, (tk.Frame, tk.LabelFrame)):
+                widget.configure(bg=self.theme["panel"])
+            elif isinstance(widget, tk.Label):
+                widget.configure(bg=self.theme["panel"], fg=self.theme["fg"])
+            elif isinstance(widget, tk.Text):
+                widget.configure(bg=self.theme["bg"], fg=self.theme["fg"], insertbackground=self.theme["accent"])
+            for child in widget.winfo_children():
+                self._recolor_widget(child)
+        except tk.TclError:
+            pass
+
+    # ---------- Plug-ins ----------
+    def _load_plugins(self):
+        if not PLUGIN_DIR.exists():
+            LOGGER.info("No plugin directory found; skipping."); return
+        # Security: warn if world-writable
+        try:
+            mode = stat.S_IMODE(os.stat(PLUGIN_DIR).st_mode)
+            if mode & stat.S_IWOTH:
+                LOGGER.warning(f"Plugin dir {PLUGIN_DIR} is world-writable. Tighten permissions (chmod 700).")
+        except Exception:
+            pass
+        for py_file in sorted(PLUGIN_DIR.glob("*.py")):
+            try:
+                spec = importlib.util.spec_from_file_location(py_file.stem, py_file)
+                mod = importlib.util.module_from_spec(spec)
+                assert spec and spec.loader
+                spec.loader.exec_module(mod)  # type: ignore
+                LOGGER.info(f"Plug-in loaded: {py_file.name}")
+                if hasattr(mod, "register") and callable(mod.register):
+                    try: mod.register(self, CORE, LOGGER); LOGGER.info(f"Plug-in registered: {py_file.name}")
+                    except Exception as e: LOGGER.error(f"Plug-in register() failed in {py_file.name}: {e}")
+            except Exception as e:
+                LOGGER.error(f"Failed to load plug-in {py_file.name}: {e}")
+
+    # ---------- Finalise after gate ----------
+    def _init_after_gate(self):
+        self._populate_controls()
+        self._populate_output()
+        self._load_plugins()
+        LOGGER.info("Chamber fully initialised.")
+# ---------- Entry point ----------
+def _headless_env_warning():
+    """
+    Warn if we're running in a headless Linux session (no X/Wayland),
+    since Tkinter GUIs won't launch without a display server.
+    """
+    if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
+        sys.stderr.write(
+            "No DISPLAY found. This GUI requires an X11/Wayland session.\n"
+        )
+        return True
+    return False
+
+
+def main():
+    """
+    Initialise and launch the EchoFrame GUI chamber.
+    """
+    if _headless_env_warning():
+        return 1  # Exit early if no display available
+
+    LOGGER.info(f"{APP_NAME} v{APP_VERSION} initialising…")
+    app = EchoFrameApp()
+
+    LOGGER.info("Entering mainloop…")
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        LOGGER.warning("Mainloop interrupted by keyboard.")
+    finally:
+        LOGGER.info("Chamber closed.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
